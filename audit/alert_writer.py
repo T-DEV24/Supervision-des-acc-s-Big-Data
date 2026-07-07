@@ -1,0 +1,1 @@
+## écrit les alertes en MongoDB / HDFS
