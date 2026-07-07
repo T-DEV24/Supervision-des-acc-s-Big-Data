@@ -1,0 +1,2 @@
+# Dépendance additionnelle TP7 à installer si elle n'est pas déjà présente.
+kafka-python==2.0.2
