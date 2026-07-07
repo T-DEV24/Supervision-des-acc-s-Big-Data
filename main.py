@@ -23,6 +23,7 @@ from auth.routes import auth_bp
 from auth.security import (TOTP_INTERVAL_SECONDS, create_jwt, get_current_totp,
                            verify_password, verify_totp)
 from db.connection import get_collection
+from db.mongo_client import ensure_alerts_indexes
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -287,7 +288,7 @@ def export_audit_csv():
 if __name__ == "__main__":
     print("=== Initialisation de la base MongoDB ===")
     try:
-        _init_users(); _init_resources(); _init_logs()
+        _init_users(); _init_resources(); _init_logs(); ensure_alerts_indexes()
     except Exception as exc:
         print(f"[INIT WARNING] MongoDB indisponible, mode CSV en lecture seule: {exc}")
     print("=== Démarrage du serveur Flask ===")
