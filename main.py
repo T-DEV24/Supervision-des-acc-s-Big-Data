@@ -1,4 +1,8 @@
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv():
+        return False
 load_dotenv()
 
 from auth.mailer import send_otp_email
@@ -7,12 +11,21 @@ from auth.mailer import send_otp_email
 """Application Flask web + API pour le TP MFA/RBAC/ABAC hospitalier."""
 import csv
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-import bcrypt
-import pandas as pd
-import pyotp
+try:
+    import bcrypt
+except ImportError:
+    bcrypt = None
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+try:
+    import pyotp
+except ImportError:
+    pyotp = None
 from flask import (Flask, Response, flash, jsonify, redirect, render_template, request,
                    session, url_for)
 
@@ -22,6 +35,7 @@ from access.routes import access_bp
 from auth.routes import auth_bp
 from auth.security import (TOTP_INTERVAL_SECONDS, create_jwt, get_current_totp,
                            verify_password, verify_totp)
+from security_hardening import configure_security, csrf, limiter
 from db.connection import get_collection
 from db.ensure_indexes import ensure_indexes
 from analytics.aggregations import (get_alerts_by_action, get_alerts_by_day,
@@ -31,6 +45,8 @@ from analytics.aggregations import (get_alerts_by_action, get_alerts_by_day,
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
+configure_security(app)
+csrf.exempt(auth_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(access_bp)
 
@@ -59,6 +75,8 @@ def _init_users():
     if col.count_documents({}) > 0:
         print("[INIT] Collection 'users' déjà remplie — import ignoré.")
         return
+    if pd is None or bcrypt is None or pyotp is None:
+        raise RuntimeError("pandas, bcrypt and pyotp are required to initialize users")
     df = pd.read_csv(os.path.join(DATASETS, "users.csv"))
     docs = []
     for _, row in df.iterrows():
@@ -79,6 +97,8 @@ def _init_resources():
     if col.count_documents({}) > 0:
         print("[INIT] Collection 'resources' déjà remplie — import ignoré.")
         return
+    if pd is None:
+        raise RuntimeError("pandas is required to initialize resources")
     docs = pd.read_csv(os.path.join(DATASETS, "resources.csv")).to_dict(orient="records")
     col.insert_many(docs)
     print(f"[INIT] {len(docs)} ressources importées dans 'resources'.")
@@ -89,6 +109,8 @@ def _init_logs():
     if col.count_documents({}) > 0:
         print("[INIT] Collection 'access_logs' déjà remplie — import ignoré.")
         return
+    if pd is None:
+        raise RuntimeError("pandas is required to initialize logs")
     docs = pd.read_csv(os.path.join(DATASETS, "access_logs.csv")).to_dict(orient="records")
     col.insert_many(docs)
     print(f"[INIT] {len(docs)} entrées de log importées dans 'access_logs'.")
@@ -97,6 +119,54 @@ def _init_logs():
 def current_user():
     uid = session.get("user_id")
     return _safe_find_one("users", {"user_id": uid}) if uid else None
+
+
+LOCK_THRESHOLD = 5
+LOCK_DURATION = timedelta(minutes=15)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _parse_datetime(value):
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _is_account_locked(user):
+    locked_until = _parse_datetime(user.get("locked_until"))
+    return bool(locked_until and locked_until > _utcnow())
+
+
+def _record_failed_login(user):
+    attempts = int(user.get("failed_attempts") or 0) + 1
+    update = {"failed_attempts": attempts}
+    if attempts >= LOCK_THRESHOLD:
+        update["locked_until"] = _utcnow() + LOCK_DURATION
+    try:
+        get_collection("users").update_one({"user_id": user["user_id"]}, {"$set": update})
+    except Exception:
+        user.update(update)
+    return update
+
+
+def _clear_login_failures(user):
+    try:
+        get_collection("users").update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {"failed_attempts": 0}, "$unset": {"locked_until": ""}},
+        )
+    except Exception:
+        user["failed_attempts"] = 0
+        user.pop("locked_until", None)
 
 
 def _mfa_enabled(user):
@@ -114,6 +184,8 @@ def _get_totp_secret(user):
 
 
 def _prepare_mfa_challenge(user):
+    if pyotp is None:
+        raise RuntimeError("pyotp is required to prepare MFA challenges")
     secret = user.get("totp_secret") or pyotp.random_base32()
     session["pending_totp_secret"] = secret
     code = get_current_totp(secret)
@@ -170,15 +242,22 @@ def index():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per 5 minutes", methods=["POST"])
 def login_page():
     if request.method == "POST":
         user_id = request.form.get("user_id", "").strip()
         password = request.form.get("password", "")
         user = _safe_find_one("users", {"user_id": user_id})
+        if user and _is_account_locked(user):
+            flash("Compte temporairement verrouillé après trop d'échecs. Réessayez dans 15 minutes.", "danger")
+            return render_template("login.html"), 423
         password_ok = bool(user and ((user.get("password_hash") and verify_password(password, user["password_hash"])) or password == user_id))
         if not password_ok:
+            if user:
+                _record_failed_login(user)
             flash("Identifiants invalides.", "danger")
             return render_template("login.html")
+        _clear_login_failures(user)
         if not _has_known_role(user):
             flash("Rôle non autorisé pour cette application.", "danger")
             return render_template("login.html")
@@ -194,6 +273,10 @@ def login_page():
 
 
 def _open_session(user, mfa_ok):
+    token_secret = session.pop("pending_totp_secret", None)
+    session.clear()
+    if token_secret and not user.get("totp_secret"):
+        session["pending_totp_secret"] = token_secret
     session["user_id"] = user["user_id"]
     session["mfa_ok"] = mfa_ok
     session["login_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -203,6 +286,7 @@ def _open_session(user, mfa_ok):
 
 
 @app.route("/verify-otp", methods=["GET", "POST"])
+@limiter.limit("5 per 5 minutes", methods=["POST"])
 def verify_otp_page():
     user = _safe_find_one("users", {"user_id": session.get("pending_user_id")})
     if not user:
