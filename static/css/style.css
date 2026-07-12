@@ -130,3 +130,39 @@ h2 {
     font-size: 0.9rem;
   }
 }
+
+:root {
+  --risk-low: #16a34a;
+  --risk-medium: #f97316;
+  --risk-high: #dc2626;
+  --chart-blue: #2563eb;
+}
+
+.kpi-card {
+  min-height: 7rem;
+}
+
+.kpi-card span {
+  color: var(--muted);
+  display: block;
+  font-size: 0.9rem;
+}
+
+.kpi-card strong {
+  color: var(--text);
+  display: block;
+  font-size: 1.8rem;
+  margin-top: 0.35rem;
+}
+
+.chart-card {
+  min-height: 24rem;
+}
+
+.chart-card canvas {
+  max-height: 19rem;
+}
+
+.risk-badge-low { background: var(--risk-low); }
+.risk-badge-medium { background: var(--risk-medium); }
+.risk-badge-high { background: var(--risk-high); }

@@ -13,7 +13,7 @@ from functools import wraps
 import bcrypt
 import pandas as pd
 import pyotp
-from flask import (Flask, Response, flash, redirect, render_template, request,
+from flask import (Flask, Response, flash, jsonify, redirect, render_template, request,
                    session, url_for)
 
 from access.engine import authorize
@@ -23,7 +23,10 @@ from auth.routes import auth_bp
 from auth.security import (TOTP_INTERVAL_SECONDS, create_jwt, get_current_totp,
                            verify_password, verify_totp)
 from db.connection import get_collection
-from db.mongo_client import ensure_alerts_indexes
+from db.ensure_indexes import ensure_indexes
+from analytics.aggregations import (get_alerts_by_action, get_alerts_by_day,
+    get_alerts_by_department, get_alerts_by_hour, get_alerts_by_risk_level,
+    get_dashboard_summary, get_high_risk_alerts, get_top_risky_users)
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -227,13 +230,73 @@ def logout():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    logs = sorted(_safe_find("access_logs"), key=lambda x: x.get("timestamp", ""), reverse=True)
-    uid = session["user_id"]
-    user_logs = [l for l in logs if l.get("user_id") == uid]
-    denied = [l for l in user_logs if str(l.get("success")).lower() == "false"]
-    by_type = {}
-    for l in user_logs: by_type[l.get("resource_type", "inconnu")] = by_type.get(l.get("resource_type", "inconnu"), 0) + 1
-    return render_template("dashboard.html", stats={"total": len(user_logs), "denied": len(denied), "recent": user_logs[:5], "by_type": by_type})
+    departments = sorted(get_alerts_by_department().keys())
+    return render_template("dashboard.html", departments=departments)
+
+
+@app.route("/api/dashboard/summary")
+@login_required
+def api_dashboard_summary():
+    return jsonify(get_dashboard_summary())
+
+
+@app.route("/api/dashboard/top-users")
+@login_required
+def api_dashboard_top_users():
+    n = min(max(int(request.args.get("n", 10)), 1), 50)
+    return jsonify(get_top_risky_users(n))
+
+
+@app.route("/api/dashboard/timeseries")
+@login_required
+def api_dashboard_timeseries():
+    granularity = request.args.get("granularity", "hour")
+    if granularity == "day":
+        return jsonify(get_alerts_by_day(30))
+    return jsonify(get_alerts_by_hour())
+
+
+@app.route("/api/dashboard/by-action")
+@login_required
+def api_dashboard_by_action():
+    return jsonify(get_alerts_by_action())
+
+
+@app.route("/api/dashboard/by-department")
+@login_required
+def api_dashboard_by_department():
+    return jsonify(get_alerts_by_department())
+
+
+@app.route("/api/dashboard/by-risk-level")
+@login_required
+def api_dashboard_by_risk_level():
+    return jsonify(get_alerts_by_risk_level())
+
+
+@app.route("/users/<user_id>/alerts")
+@login_required
+def user_alerts_page(user_id):
+    alerts = [alert for alert in get_high_risk_alerts() if str(alert.get("user_id")) == str(user_id)]
+    return render_template("user_alerts.html", user_id=user_id, alerts=alerts)
+
+
+@app.route("/dashboard/top-users.csv")
+@login_required
+def export_top_users_csv():
+    fields = ["user_id", "total_score", "alert_count", "dominant_risk_level", "last_reason"]
+    rows = get_top_risky_users(10)
+    output = ",".join(fields) + "\n" + "\n".join(",".join(str(row.get(field, "")).replace(",", " ") for field in fields) for row in rows)
+    return Response(output, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=top_risky_users.csv"})
+
+
+@app.route("/dashboard/alerts.csv")
+@login_required
+def export_alerts_csv():
+    fields = ["timestamp", "alert_id", "user_id", "department", "action", "risk_score", "risk_level", "risk_reasons"]
+    rows = get_high_risk_alerts()
+    output = ",".join(fields) + "\n" + "\n".join(",".join(str(row.get(field, "")).replace(",", " ").replace("\n", " ") for field in fields) for row in rows)
+    return Response(output, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=alerts.csv"})
 
 
 @app.route("/resources")
@@ -288,7 +351,7 @@ def export_audit_csv():
 if __name__ == "__main__":
     print("=== Initialisation de la base MongoDB ===")
     try:
-        _init_users(); _init_resources(); _init_logs(); ensure_alerts_indexes()
+        _init_users(); _init_resources(); _init_logs(); ensure_indexes()
     except Exception as exc:
         print(f"[INIT WARNING] MongoDB indisponible, mode CSV en lecture seule: {exc}")
     print("=== Démarrage du serveur Flask ===")
