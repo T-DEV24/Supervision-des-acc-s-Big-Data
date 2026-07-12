@@ -11,6 +11,7 @@
     <div class="small text-muted mb-3">Expiration dans <span id="otpCountdown">180</span> secondes</div>
 
     <form method="post" id="otpForm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label for="otpInput" class="form-label">Code OTP</label>
       <input id="otpInput" name="otp" class="form-control otp-input" maxlength="6" pattern="\d{6}" inputmode="numeric" required>
       <button class="btn btn-primary w-100 mt-3">Vérifier</button>

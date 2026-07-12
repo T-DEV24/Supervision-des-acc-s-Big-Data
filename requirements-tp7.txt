@@ -1,2 +1,6 @@
 # Dépendance additionnelle TP7 à installer si elle n'est pas déjà présente.
 kafka-python==2.0.2
+Flask-Limiter==3.12
+Flask-WTF==1.2.2
+
+python-dotenv==1.2.1
